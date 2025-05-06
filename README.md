@@ -19,6 +19,48 @@ __Database migrations written in Go. Use as [CLI](#cli-usage) or import as [libr
 
 Forked from [mattes/migrate](https://github.com/mattes/migrate)
 
+# forked repository
+
+This is a fork from the [original 
+`golang-migrate/migrate`](https://github.com/golang-migrate/migrate) project,
+maintained by Lightning Labs.
+
+The project was forked to speed up development for features required by
+Lightning Labs. All changes in this fork will also be suggested upstream as
+Pull Requests, so there is a chance the fork will eventually not be needed.
+
+As long as the fork exists, the following procedure is proposed:
+**New feature**:
+ - Create a PR against the `ll-fork` branch.
+ - Once merged, a new tag should be pushed (see "tag naming" section below),
+   updating the PR number in the tag name.
+
+**Rebasing with upstream**:
+ - The `master` branch of the fork can always be fast-forwarded to match the
+   upstream's `master` branch.
+ - If a new feature or bugfix is added to upstream's `master`, we'll want to
+   rebase the `ll-fork` branch on top of the latest `master` branch.
+ - After rebasing, a new tag should be pushed (see "tag naming" section below),
+   updating the first part of the tag name (upstream tag and commit).
+
+## tag naming
+
+To make it very obvious what a tagged version of this fork contains in terms of
+the upstream changes (independent of any rebases of the `ll-fork` branch), the
+tags pushed from the `ll-fork` branch should be named as follows:
+```text
+  v4.18.2-9023d66-fork-pr-1
+```
+
+Which consists of the following elements:
+
+```text
+  v<last_upstream_tag>-<actual_upstream_commit_in_master>-fork-pr-<last_merged_pr_in_fork>
+```
+
+This naming schema allows us to track both rebases of the `ll-fork` as well as
+new features added to the fork.
+
 ## Databases
 
 Database drivers run migrations. [Add a new database?](database/driver.go)
