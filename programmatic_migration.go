@@ -2,21 +2,18 @@ package migrate
 
 import "github.com/golang-migrate/migrate/v4/database"
 
-// ProgrammaticMigration is a callback function type that can be used to execute
-// a Golang based migration step after a SQL based migration step has been
-// executed. The callback function receives the migration and the database
-// driver as arguments.
+// ProgrammaticMigration is a Golang function type that can be used to execute
+// a Golang-based migration. The Golang function receives the migration and
+// the database driver as arguments.
 type ProgrammaticMigration func(migr *Migration, driver database.Driver) error
 
-// options is a set of optional options that can be set when a Migrate instance
-// is created.
+// options is a set of optional parameters that can be set when creating a
+// Migrate instance.
 type options struct {
 	// programmaticMigrations is a map of ProgrammaticMigration functions
-	// that can be used to execute a Golang based migration step after a SQL
-	// based migration step has been executed. The key is the migration
-	// version and the value is the callback function that should be run
-	// _after_ the step was executed (but within the same database
-	// transaction).
+	// that can be used to execute a Golang-based migration. The key is the
+	// migration version, and the value is the Golang function that should
+	// be run.
 	programmaticMigrations map[uint]ProgrammaticMigration
 }
 
@@ -31,26 +28,30 @@ func defaultOptions() options {
 type Option func(*options)
 
 // WithProgrammaticMigrations is an option that can be used to set a map of
-// ProgrammaticMigration functions that can be used to execute a Golang based
-// migration step after a SQL based migration step has been executed. The key is
-// the migration version and the value is the programmatic migration function
-// that should be run _after_ the step was executed (but before the version is
-// marked as cleanly executed). An error returned from the programmatic
-// migration will cause the migration to fail and the step to be marked as
-// dirty.
+// ProgrammaticMigration functions that can be used to execute a Golang-based
+// migration step. The key is the migration version, and the value is the
+// Golang function that should be run. An error returned from the programmatic
+// migration will cause the migration to fail but will **not** set the database
+// to a dirty state. Additionally, if the programmatic migration fails, the
+// database version will be reset to the last set version before executing the
+// programmatic migration. The effect of this is that the programmatic migration
+// will be re-run on the next startup of the database.
 func WithProgrammaticMigrations(pMigrs map[uint]ProgrammaticMigration) Option {
 	return func(o *options) {
-		o.programmaticMigrations = pMigrs
+		for version, pMigr := range pMigrs {
+			WithProgrammaticMigration(version, pMigr)(o)
+		}
 	}
 }
 
 // WithProgrammaticMigration is an option that can be used to set a
 // ProgrammaticMigration function that can be used to execute a Golang based
-// migration step after the SQL based migration step with the given version
-// number has been executed. The programmatic migration is the function that
-// should be run _after_ the step was executed (but before the version is marked
-// as cleanly executed). An error returned from the programmatic migration will
-// cause the migration to fail and the step to be marked as dirty.
+// migration.  An error returned from the programmatic migration will cause the
+// migration to fail but will **not** set the database to a dirty state.
+// Additionally, if the programmatic migration fails, the database version will
+// be reset to the last set version before executing the programmatic migration.
+// The effect of this is that the programmatic migration will be re-run on the
+// next startup of the database.
 func WithProgrammaticMigration(version uint,
 	pMigr ProgrammaticMigration) Option {
 
