@@ -55,58 +55,60 @@ func (e ErrDirty) Error() string {
 	return fmt.Sprintf("Dirty database version %v. Fix and force version.", e.Version)
 }
 
-// PostStepCallback is a callback function type that can be used to execute a
-// Golang based migration step after a SQL based migration step has been
+// ProgrammaticMigration is a callback function type that can be used to execute
+// a Golang based migration step after a SQL based migration step has been
 // executed. The callback function receives the migration and the database
 // driver as arguments.
-type PostStepCallback func(migr *Migration, driver database.Driver) error
+type ProgrammaticMigration func(migr *Migration, driver database.Driver) error
 
 // options is a set of optional options that can be set when a Migrate instance
 // is created.
 type options struct {
-	// postStepCallbacks is a map of PostStepCallback functions that can be
-	// used to execute a Golang based migration step after a SQL based
-	// migration step has been executed. The key is the migration version
-	// and the value is the callback function that should be run _after_ the
-	// step was executed (but within the same database transaction).
-	postStepCallbacks map[uint]PostStepCallback
+	// programmaticMigrations is a map of ProgrammaticMigration functions
+	// that can be used to execute a Golang based migration step after a SQL
+	// based migration step has been executed. The key is the migration
+	// version and the value is the callback function that should be run
+	// _after_ the step was executed (but within the same database
+	// transaction).
+	programmaticMigrations map[uint]ProgrammaticMigration
 }
 
 // defaultOptions returns a new options struct with default values.
 func defaultOptions() options {
 	return options{
-		postStepCallbacks: make(map[uint]PostStepCallback),
+		programmaticMigrations: make(map[uint]ProgrammaticMigration),
 	}
 }
 
 // Option is a function that can be used to set options on a Migrate instance.
 type Option func(*options)
 
-// WithPostStepCallbacks is an option that can be used to set a map of
-// PostStepCallback functions that can be used to execute a Golang based
+// WithProgrammaticMigrations is an option that can be used to set a map of
+// ProgrammaticMigration functions that can be used to execute a Golang based
 // migration step after a SQL based migration step has been executed. The key is
-// the migration version and the value is the callback function that should be
-// run _after_ the step was executed (but before the version is marked as
-// cleanly executed). An error returned from the callback will cause the
-// migration to fail and the step to be marked as dirty.
-func WithPostStepCallbacks(
-	postStepCallbacks map[uint]PostStepCallback) Option {
-
+// the migration version and the value is the programmatic migration function
+// that should be run _after_ the step was executed (but before the version is
+// marked as cleanly executed). An error returned from the programmatic
+// migration will cause the migration to fail and the step to be marked as
+// dirty.
+func WithProgrammaticMigrations(pMigrs map[uint]ProgrammaticMigration) Option {
 	return func(o *options) {
-		o.postStepCallbacks = postStepCallbacks
+		o.programmaticMigrations = pMigrs
 	}
 }
 
-// WithPostStepCallback is an option that can be used to set a PostStepCallback
-// function that can be used to execute a Golang based migration step after the
-// SQL based migration step with the given version number has been executed. The
-// callback is the function that should be run _after_ the step was executed
-// (but before the version is marked as cleanly executed). An error returned
-// from the callback will cause the migration to fail and the step to be marked
-// as dirty.
-func WithPostStepCallback(version uint, callback PostStepCallback) Option {
+// WithProgrammaticMigration is an option that can be used to set a
+// ProgrammaticMigration function that can be used to execute a Golang based
+// migration step after the SQL based migration step with the given version
+// number has been executed. The programmatic migration is the function that
+// should be run _after_ the step was executed (but before the version is marked
+// as cleanly executed). An error returned from the programmatic migration will
+// cause the migration to fail and the step to be marked as dirty.
+func WithProgrammaticMigration(version uint,
+	pMigr ProgrammaticMigration) Option {
+
 	return func(o *options) {
-		o.postStepCallbacks[version] = callback
+		o.programmaticMigrations[version] = pMigr
 	}
 }
 
@@ -818,23 +820,26 @@ func (m *Migrate) runMigrations(ret <-chan interface{}) error {
 					return err
 				}
 
-				// If there is a post execution function for
-				// this migration, run it now.
-				cb, ok := m.opts.postStepCallbacks[migr.Version]
+				migrVer := migr.Version
+
+				// If there is a programmatic migration function
+				// for this migration, run it now.
+				cb, ok := m.opts.programmaticMigrations[migrVer]
 				if ok {
-					m.logVerbosePrintf("Running post step "+
-						"callback for %v\n", migr.LogString())
+					m.logVerbosePrintf("Running "+
+						"programmatic migration for "+
+						"%v\n", migr.LogString())
 
 					err := cb(migr, m.databaseDrv)
 					if err != nil {
 						return fmt.Errorf("failed to "+
-							"execute post "+
-							"step callback: %w",
-							err)
+							"execute programmatic "+
+							"migration: %w", err)
 					}
 
-					m.logVerbosePrintf("Post step callback "+
-						"finished for %v\n", migr.LogString())
+					m.logVerbosePrintf("Programmatic"+
+						"migration finished for "+
+						"%v\n", migr.LogString())
 				}
 			}
 
