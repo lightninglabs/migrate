@@ -866,22 +866,28 @@ func (m *Migrate) execProgrammaticMigration(migr *Migration) error {
 		return err
 	}
 
-	err = programmaticMigration(migr, m.databaseDrv)
+	err = programmaticMigration.ProgrammaticMigr(migr, m.databaseDrv)
 	if err != nil {
-		// Reset the version to the version set before executing the
-		// programmatic migration. Therefore, the programmatic migration
-		// will be re-executed on the next startup until it succeeds.
-		setErr := m.databaseDrv.SetVersion(curVersion, false)
-		if setErr != nil {
-			// Note that if we error here, the database version will
-			// remain in a dirty state. As we cannot know if the
-			// programmatic migration was executed or not in that
-			// scenario, manual intervention is required.
-			return fmt.Errorf("WARNING, failed to set migration "+
-				"version after programmatic migration "+
-				"errored. Manual intervention needed! "+
-				"Programmatic migration error: %w, version "+
-				"setting error : %w", err, setErr)
+		// If the programmatic migration should be re-run on the next
+		// startup, we reset the version to the version set before
+		// executing the programmatic migration. Therefore, the
+		// programmatic migration will effectively be re-executed on the
+		// next startup until it succeeds.
+		if programmaticMigration.ResetVersionOnError {
+			setErr := m.databaseDrv.SetVersion(curVersion, false)
+			if setErr != nil {
+				// Note that if we error here, the database
+				// version will remain in a dirty state. As we
+				// cannot know if the programmatic migration was
+				// executed or not in that scenario, manual
+				// intervention is required.
+				return fmt.Errorf("WARNING, failed to set "+
+					"migration version after programmatic "+
+					"migration errored. Manual "+
+					"intervention needed! Programmatic "+
+					"migration error: %w, version setting "+
+					"error : %w", err, setErr)
+			}
 		}
 
 		return fmt.Errorf("failed to execute programmatic migration: "+

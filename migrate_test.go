@@ -904,16 +904,26 @@ func TestUpAndDown(t *testing.T) {
 
 func TestProgrammaticMigration(t *testing.T) {
 	m, _ := New("stub://", "stub://", WithProgrammaticMigrations(
-		map[uint]ProgrammaticMigration{
-			2: func(m *Migration, driver database.Driver) error {
-				return driver.Run(
-					strings.NewReader("CALLBACK 2"),
-				)
+		map[uint]ProgrammaticMigrEntry{
+			2: {
+				ResetVersionOnError: true,
+				ProgrammaticMigr: func(m *Migration,
+					driver database.Driver) error {
+
+					return driver.Run(
+						strings.NewReader("CALLBACK 2"),
+					)
+				},
 			},
-			7: func(m *Migration, driver database.Driver) error {
-				return driver.Run(
-					strings.NewReader("CALLBACK 7"),
-				)
+			7: {
+				ResetVersionOnError: true,
+				ProgrammaticMigr: func(m *Migration,
+					driver database.Driver) error {
+
+					return driver.Run(
+						strings.NewReader("CALLBACK 7"),
+					)
+				},
 			},
 		},
 	))
@@ -1026,32 +1036,43 @@ func TestProgrammaticMigrationError(t *testing.T) {
 	// The programmatic migration for version 2 will error if
 	// shouldFail == false, and succeed if it is set to true.
 	m, _ := New("stub://", "stub://", WithProgrammaticMigrations(
-		map[uint]ProgrammaticMigration{
-			2: func(migr *Migration, driver database.Driver) error {
-				if shouldFail {
+		map[uint]ProgrammaticMigrEntry{
+			2: {
+				ResetVersionOnError: true,
+				ProgrammaticMigr: func(migr *Migration,
+					driver database.Driver) error {
+
+					if shouldFail {
+						err := driver.Run(
+							strings.NewReader(
+								"CALLBACK 2 FAILURE",
+							))
+						if err != nil {
+							return err
+						}
+
+						return cbError
+					}
+
 					err := driver.Run(strings.NewReader(
-						"CALLBACK 2 FAILURE",
+						"CALLBACK 2 SUCCESS",
 					))
 					if err != nil {
 						return err
 					}
 
-					return cbError
-				}
-
-				err := driver.Run(strings.NewReader(
-					"CALLBACK 2 SUCCESS",
-				))
-				if err != nil {
-					return err
-				}
-
-				return nil
+					return nil
+				},
 			},
-			7: func(m *Migration, driver database.Driver) error {
-				return driver.Run(
-					strings.NewReader("CALLBACK 7"),
-				)
+			7: {
+				ResetVersionOnError: true,
+				ProgrammaticMigr: func(m *Migration,
+					driver database.Driver) error {
+
+					return driver.Run(
+						strings.NewReader("CALLBACK 7"),
+					)
+				},
 			},
 		},
 	))
@@ -1271,6 +1292,60 @@ func TestProgrammaticMigrationError(t *testing.T) {
 	checkVersion(t, dbDrv, -1)
 }
 
+// TestProgrammaticMigrationErrorNoRerun ensures that when ResetVersionOnError
+// is false, a failing programmatic migration leaves the database dirty at the
+// current migration version instead of rewinding to the prior version.
+func TestProgrammaticMigrationErrorNoRerun(t *testing.T) {
+	cbError := errors.New("programmatic migration failure")
+
+	m, _ := New("stub://", "stub://", WithProgrammaticMigrations(
+		map[uint]ProgrammaticMigrEntry{
+			2: {
+				ResetVersionOnError: false,
+				ProgrammaticMigr: func(migr *Migration,
+					driver database.Driver) error {
+
+					if err := driver.Run(strings.NewReader(
+						"CALLBACK 2 FAILURE",
+					)); err != nil {
+						return err
+					}
+					return cbError
+				},
+			},
+		},
+	))
+
+	m.sourceDrv.(*sStub.Stub).Migrations = sourceProgrammaticMigrations
+	dbDrv := m.databaseDrv.(*dStub.Stub)
+
+	err := m.Up()
+	if !errors.Is(err, cbError) {
+		t.Fatalf("expected cbError from failing programmatic "+
+			"migration, got %v", err)
+	}
+
+	version, dirty, err := dbDrv.Version()
+	if err != nil {
+		t.Fatalf("version: %v", err)
+	}
+	if version != 2 || !dirty {
+		t.Fatalf("expected version 2 dirty after failure, got "+
+			"version=%d dirty=%v", version, dirty)
+	}
+	if !bytes.Equal(dbDrv.LastRunMigration, []byte("CALLBACK 2 FAILURE")) {
+		t.Fatalf("expected last migration body to be failure "+
+			"callback, got %s", dbDrv.LastRunMigration)
+	}
+
+	// Re-running Up again, should fail with ErrDirty for version 2, as
+	// the database should be in a dirty state.
+	if err = m.Up(); !errors.Is(err, ErrDirty{2}) {
+		t.Fatalf("expected version 2 dirty error on re-running Up, "+
+			"got %v", err)
+	}
+}
+
 // TestMigrationTypeCombos test ensures that a migration cannot be both an SQL
 // migration and a programmatic migration at the same time. It also tests that a
 // migration can be neither an SQL migration nor a programmatic migration.
@@ -1278,11 +1353,16 @@ func TestMigrationTypeCombos(t *testing.T) {
 	// Test that a migration can't be both an SQL migration and a
 	// programmatic migration at the same time.
 	m1, _ := New("stub://", "stub://", WithProgrammaticMigrations(
-		map[uint]ProgrammaticMigration{
-			2: func(m *Migration, driver database.Driver) error {
-				return driver.Run(
-					strings.NewReader("CALLBACK 2"),
-				)
+		map[uint]ProgrammaticMigrEntry{
+			2: {
+				ResetVersionOnError: true,
+				ProgrammaticMigr: func(m *Migration,
+					driver database.Driver) error {
+
+					return driver.Run(
+						strings.NewReader("CALLBACK 2"),
+					)
+				},
 			},
 		},
 	))
