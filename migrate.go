@@ -28,12 +28,19 @@ var DefaultPrefetchMigrations = uint(10)
 // DefaultLockTimeout sets the max time a database driver has to acquire a lock.
 var DefaultLockTimeout = 15 * time.Second
 
+// classifyPeekLimit caps how many bytes we read of a migration when
+// classifying if it contains an SQL migration or not.
+// The cap is set to 128 KB.
+const classifyPeekLimit = 128 * 1024
+
 var (
 	ErrNoChange       = errors.New("no change")
 	ErrNilVersion     = errors.New("no migration")
 	ErrInvalidVersion = errors.New("version must be >= -1")
 	ErrLocked         = errors.New("database locked")
 	ErrLockTimeout    = errors.New("timeout: can't acquire database lock")
+	ErrMixedMigration = errors.New("migration has both an SQL migration " +
+		"and a programmatic migration set")
 )
 
 // ErrShortLimit is an error returned when not enough migrations
@@ -53,61 +60,6 @@ type ErrDirty struct {
 
 func (e ErrDirty) Error() string {
 	return fmt.Sprintf("Dirty database version %v. Fix and force version.", e.Version)
-}
-
-// PostStepCallback is a callback function type that can be used to execute a
-// Golang based migration step after a SQL based migration step has been
-// executed. The callback function receives the migration and the database
-// driver as arguments.
-type PostStepCallback func(migr *Migration, driver database.Driver) error
-
-// options is a set of optional options that can be set when a Migrate instance
-// is created.
-type options struct {
-	// postStepCallbacks is a map of PostStepCallback functions that can be
-	// used to execute a Golang based migration step after a SQL based
-	// migration step has been executed. The key is the migration version
-	// and the value is the callback function that should be run _after_ the
-	// step was executed (but within the same database transaction).
-	postStepCallbacks map[uint]PostStepCallback
-}
-
-// defaultOptions returns a new options struct with default values.
-func defaultOptions() options {
-	return options{
-		postStepCallbacks: make(map[uint]PostStepCallback),
-	}
-}
-
-// Option is a function that can be used to set options on a Migrate instance.
-type Option func(*options)
-
-// WithPostStepCallbacks is an option that can be used to set a map of
-// PostStepCallback functions that can be used to execute a Golang based
-// migration step after a SQL based migration step has been executed. The key is
-// the migration version and the value is the callback function that should be
-// run _after_ the step was executed (but before the version is marked as
-// cleanly executed). An error returned from the callback will cause the
-// migration to fail and the step to be marked as dirty.
-func WithPostStepCallbacks(
-	postStepCallbacks map[uint]PostStepCallback) Option {
-
-	return func(o *options) {
-		o.postStepCallbacks = postStepCallbacks
-	}
-}
-
-// WithPostStepCallback is an option that can be used to set a PostStepCallback
-// function that can be used to execute a Golang based migration step after the
-// SQL based migration step with the given version number has been executed. The
-// callback is the function that should be run _after_ the step was executed
-// (but before the version is marked as cleanly executed). An error returned
-// from the callback will cause the migration to fail and the step to be marked
-// as dirty.
-func WithPostStepCallback(version uint, callback PostStepCallback) Option {
-	return func(o *options) {
-		o.postStepCallbacks[version] = callback
-	}
 }
 
 type Migrate struct {
@@ -807,34 +759,55 @@ func (m *Migrate) runMigrations(ret <-chan interface{}) error {
 		case *Migration:
 			migr := r
 
-			// set version with dirty state
-			if err := m.databaseDrv.SetVersion(migr.TargetVersion, true); err != nil {
-				return err
-			}
-
 			if migr.Body != nil {
-				m.logVerbosePrintf("Read and execute %v\n", migr.LogString())
-				if err := m.databaseDrv.Run(migr.BufferedBody); err != nil {
+				// Check if the migration contains an SQL
+				// migration.
+				hasSqlMig, err := classifyMigrationBody(
+					migr, classifyPeekLimit,
+				)
+				if err != nil {
 					return err
 				}
 
-				// If there is a post execution function for
-				// this migration, run it now.
-				cb, ok := m.opts.postStepCallbacks[migr.Version]
-				if ok {
-					m.logVerbosePrintf("Running post step "+
-						"callback for %v\n", migr.LogString())
+				ver := migr.Version
 
-					err := cb(migr, m.databaseDrv)
-					if err != nil {
-						return fmt.Errorf("failed to "+
-							"execute post "+
-							"step callback: %w",
-							err)
+				// Check if the migration contains a
+				// programmatic migration.
+				_, hasPMig := m.opts.programmaticMigrations[ver]
+
+				// Execute the SQL migration or the programmatic
+				// migration.
+				switch {
+				case hasSqlMig && hasPMig:
+					return ErrMixedMigration
+
+				case hasSqlMig:
+					if err = m.databaseDrv.SetVersion(migr.TargetVersion, true); err != nil {
+						return err
 					}
 
-					m.logVerbosePrintf("Post step callback "+
-						"finished for %v\n", migr.LogString())
+					m.logVerbosePrintf("Read and execute %v\n", migr.LogString())
+					if err = m.databaseDrv.Run(migr.BufferedBody); err != nil {
+						return err
+					}
+
+				case hasPMig:
+					err = m.execProgrammaticMigration(migr)
+					if err != nil {
+						return fmt.Errorf("execution "+
+							"of programmatic "+
+							"migration failed: "+
+							"%w", err)
+					}
+
+				default:
+					// When the migration contains no SQL
+					// migration or programmatic migration,
+					// we continue and set the version to
+					// the migr.TargetVersion.
+					m.logVerbosePrintf("Warning: "+
+						"Contentless migration "+
+						"executed at version %d!", ver)
 				}
 			}
 
@@ -860,6 +833,70 @@ func (m *Migrate) runMigrations(ret <-chan interface{}) error {
 			return fmt.Errorf("unknown type: %T with value: %+v", r, r)
 		}
 	}
+	return nil
+}
+
+// execProgrammaticMigration checks if a programmatic migration exists for the
+// passed migration and proceeds to execute if one exists. If the programmatic
+// migration fails, the function will reset the database version to the version
+// it was set to before attempting to execute the programmatic migration.
+func (m *Migrate) execProgrammaticMigration(migr *Migration) error {
+	m.logVerbosePrintf("Running programmatic migration for %v\n",
+		migr.LogString())
+
+	programmaticMigration, ok := m.opts.programmaticMigrations[migr.Version]
+	if !ok {
+		return fmt.Errorf("no programmatic migration set for %v",
+			migr.LogString())
+	}
+
+	// Get the current database version before executing the programmatic migration.
+	curVersion, dirty, err := m.databaseDrv.Version()
+	if err != nil {
+		return fmt.Errorf("unable to get current version: %w", err)
+	}
+
+	if dirty {
+		return ErrDirty{curVersion}
+	}
+
+	// Persist that we are at the migration version of the programmatic
+	// migration.
+	if err = m.databaseDrv.SetVersion(int(migr.Version), true); err != nil {
+		return err
+	}
+
+	err = programmaticMigration.ProgrammaticMigr(migr, m.databaseDrv)
+	if err != nil {
+		// If the programmatic migration should be re-run on the next
+		// startup, we reset the version to the version set before
+		// executing the programmatic migration. Therefore, the
+		// programmatic migration will effectively be re-executed on the
+		// next startup until it succeeds.
+		if programmaticMigration.ResetVersionOnError {
+			setErr := m.databaseDrv.SetVersion(curVersion, false)
+			if setErr != nil {
+				// Note that if we error here, the database
+				// version will remain in a dirty state. As we
+				// cannot know if the programmatic migration was
+				// executed or not in that scenario, manual
+				// intervention is required.
+				return fmt.Errorf("WARNING, failed to set "+
+					"migration version after programmatic "+
+					"migration errored. Manual "+
+					"intervention needed! Programmatic "+
+					"migration error: %w, version setting "+
+					"error : %w", err, setErr)
+			}
+		}
+
+		return fmt.Errorf("failed to execute programmatic migration: "+
+			"%w", err)
+	}
+
+	m.logVerbosePrintf("Programmatic migration finished for %v\n",
+		migr.LogString())
+
 	return nil
 }
 

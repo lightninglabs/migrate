@@ -23,6 +23,15 @@ import (
 //	| u d |  -  | u   | u d |   d |  -  | u d |
 var sourceStubMigrations *source.Migrations
 
+// sourceProgrammaticMigrations hold the following migrations:
+// u = up migration, d = down migration, n = version, SQL = SQL migration,
+// PGM = Programmatic migration
+//
+//	|  1  |  2  |  3  |  4  |  5  |  -  |  7  |
+//	| SQL | PGM | SQL | SQL | SQL |  -  | PGM |
+//	| u d | u d | u   | u d |   d |  -  | u   |
+var sourceProgrammaticMigrations *source.Migrations
+
 const (
 	srcDrvNameStub = "stub"
 	dbDrvNameStub  = "stub"
@@ -38,6 +47,20 @@ func init() {
 	sourceStubMigrations.Append(&source.Migration{Version: 5, Direction: source.Down, Identifier: "DROP 5"})
 	sourceStubMigrations.Append(&source.Migration{Version: 7, Direction: source.Up, Identifier: "CREATE 7"})
 	sourceStubMigrations.Append(&source.Migration{Version: 7, Direction: source.Down, Identifier: "DROP 7"})
+
+	// Init the sourceProgrammaticMigrations. Note that the content of the
+	// programmatic migrations for version 2 & 7 is defined in the
+	// respective unit tests where the sourceProgrammaticMigrations is used.
+	sourceProgrammaticMigrations = source.NewMigrations()
+	sourceProgrammaticMigrations.Append(&source.Migration{Version: 1, Direction: source.Up, Identifier: "CREATE 1"})
+	sourceProgrammaticMigrations.Append(&source.Migration{Version: 1, Direction: source.Down, Identifier: "DROP 1"})
+	sourceProgrammaticMigrations.Append(&source.Migration{Version: 2, Direction: source.Up, Identifier: ""})
+	sourceProgrammaticMigrations.Append(&source.Migration{Version: 2, Direction: source.Down, Identifier: ""})
+	sourceProgrammaticMigrations.Append(&source.Migration{Version: 3, Direction: source.Up, Identifier: "CREATE 3"})
+	sourceProgrammaticMigrations.Append(&source.Migration{Version: 4, Direction: source.Up, Identifier: "CREATE 4"})
+	sourceProgrammaticMigrations.Append(&source.Migration{Version: 4, Direction: source.Down, Identifier: "DROP 4"})
+	sourceProgrammaticMigrations.Append(&source.Migration{Version: 5, Direction: source.Down, Identifier: "DROP 5"})
+	sourceProgrammaticMigrations.Append(&source.Migration{Version: 7, Direction: source.Up, Identifier: ""})
 }
 
 type DummyInstance struct{ Name string }
@@ -879,22 +902,32 @@ func TestUpAndDown(t *testing.T) {
 	equalDbSeq(t, 1, expectedSequence, dbDrv)
 }
 
-func TestPostStepCallback(t *testing.T) {
-	m, _ := New("stub://", "stub://", WithPostStepCallbacks(
-		map[uint]PostStepCallback{
-			1: func(m *Migration, driver database.Driver) error {
-				return driver.Run(
-					strings.NewReader("CALLBACK 1"),
-				)
+func TestProgrammaticMigration(t *testing.T) {
+	m, _ := New("stub://", "stub://", WithProgrammaticMigrations(
+		map[uint]ProgrammaticMigrEntry{
+			2: {
+				ResetVersionOnError: true,
+				ProgrammaticMigr: func(m *Migration,
+					driver database.Driver) error {
+
+					return driver.Run(
+						strings.NewReader("CALLBACK 2"),
+					)
+				},
 			},
-			7: func(m *Migration, driver database.Driver) error {
-				return driver.Run(
-					strings.NewReader("CALLBACK 7"),
-				)
+			7: {
+				ResetVersionOnError: true,
+				ProgrammaticMigr: func(m *Migration,
+					driver database.Driver) error {
+
+					return driver.Run(
+						strings.NewReader("CALLBACK 7"),
+					)
+				},
 			},
 		},
 	))
-	m.sourceDrv.(*sStub.Stub).Migrations = sourceStubMigrations
+	m.sourceDrv.(*sStub.Stub).Migrations = sourceProgrammaticMigrations
 	dbDrv := m.databaseDrv.(*dStub.Stub)
 
 	// go Up first
@@ -903,10 +936,9 @@ func TestPostStepCallback(t *testing.T) {
 	}
 	expectedSequence := migrationSequence{
 		mr("CREATE 1"),
-		mr("CALLBACK 1"),
+		mr("CALLBACK 2"),
 		mr("CREATE 3"),
 		mr("CREATE 4"),
-		mr("CREATE 7"),
 		mr("CALLBACK 7"),
 	}
 	equalDbSeq(t, 0, expectedSequence, dbDrv)
@@ -920,24 +952,25 @@ func TestPostStepCallback(t *testing.T) {
 	if err := m.Down(); err != nil {
 		t.Fatal(err)
 	}
+
+	// Note that "CALLBACK 7" isn't repeated when going down, as that
+	// migration source only contains an .up migration for version 7, and
+	// not a .down migration.
 	expectedSequence = migrationSequence{
 		mr("CREATE 1"),
-		mr("CALLBACK 1"),
+		mr("CALLBACK 2"),
 		mr("CREATE 3"),
 		mr("CREATE 4"),
-		mr("CREATE 7"),
-		mr("CALLBACK 7"),
-		mr("DROP 7"),
 		mr("CALLBACK 7"),
 		mr("DROP 5"),
 		mr("DROP 4"),
+		mr("CALLBACK 2"),
 		mr("DROP 1"),
-		mr("CALLBACK 1"),
 	}
 	equalDbSeq(t, 1, expectedSequence, dbDrv)
 
-	if !bytes.Equal(dbDrv.LastRunMigration, []byte("CALLBACK 1")) {
-		t.Fatalf("expected database last migration to be callback 1, "+
+	if !bytes.Equal(dbDrv.LastRunMigration, []byte("DROP 1")) {
+		t.Fatalf("expected database last migration to be DROP 1, "+
 			"got %s", dbDrv.LastRunMigration)
 	}
 
@@ -947,19 +980,15 @@ func TestPostStepCallback(t *testing.T) {
 	}
 	expectedSequence = migrationSequence{
 		mr("CREATE 1"),
-		mr("CALLBACK 1"),
+		mr("CALLBACK 2"),
 		mr("CREATE 3"),
 		mr("CREATE 4"),
-		mr("CREATE 7"),
-		mr("CALLBACK 7"),
-		mr("DROP 7"),
 		mr("CALLBACK 7"),
 		mr("DROP 5"),
 		mr("DROP 4"),
+		mr("CALLBACK 2"),
 		mr("DROP 1"),
-		mr("CALLBACK 1"),
 		mr("CREATE 1"),
-		mr("CALLBACK 1"),
 	}
 	equalDbSeq(t, 2, expectedSequence, dbDrv)
 
@@ -968,25 +997,473 @@ func TestPostStepCallback(t *testing.T) {
 	}
 	expectedSequence = migrationSequence{
 		mr("CREATE 1"),
-		mr("CALLBACK 1"),
+		mr("CALLBACK 2"),
 		mr("CREATE 3"),
 		mr("CREATE 4"),
-		mr("CREATE 7"),
-		mr("CALLBACK 7"),
-		mr("DROP 7"),
 		mr("CALLBACK 7"),
 		mr("DROP 5"),
 		mr("DROP 4"),
+		mr("CALLBACK 2"),
 		mr("DROP 1"),
-		mr("CALLBACK 1"),
 		mr("CREATE 1"),
-		mr("CALLBACK 1"),
+		mr("CALLBACK 2"),
 		mr("CREATE 3"),
 		mr("CREATE 4"),
-		mr("CREATE 7"),
 		mr("CALLBACK 7"),
 	}
 	equalDbSeq(t, 3, expectedSequence, dbDrv)
+}
+
+// TestProgrammaticMigrationError simulates a programmatic migration that fails,
+// and ensures that:
+//  1. The migration process stops and returns the programmatic migration error.
+//  2. The migration version is set to the migration version set prior to
+//     executing the programmatic migration if it errors.
+//  3. Re-running Up will re-attempt the programmatic migration.
+//  4. Down will not re-execute a programmatic migration if it errored, as the
+//     version should have been set to the version prior to executing the
+//     programmatic migration.
+//  5. Once the programmatic migration succeeds, the migration can finalize and
+//     reach the latest version cleanly.
+//  6. Down will only execute the programmatic migration at a given version if a
+//     ".down" file is defined for the programmatic migration.
+func TestProgrammaticMigrationError(t *testing.T) {
+	var (
+		cbError    = errors.New("programmatic migration failure")
+		shouldFail = true
+	)
+
+	// The programmatic migration for version 2 will error if
+	// shouldFail == false, and succeed if it is set to true.
+	m, _ := New("stub://", "stub://", WithProgrammaticMigrations(
+		map[uint]ProgrammaticMigrEntry{
+			2: {
+				ResetVersionOnError: true,
+				ProgrammaticMigr: func(migr *Migration,
+					driver database.Driver) error {
+
+					if shouldFail {
+						err := driver.Run(
+							strings.NewReader(
+								"CALLBACK 2 FAILURE",
+							))
+						if err != nil {
+							return err
+						}
+
+						return cbError
+					}
+
+					err := driver.Run(strings.NewReader(
+						"CALLBACK 2 SUCCESS",
+					))
+					if err != nil {
+						return err
+					}
+
+					return nil
+				},
+			},
+			7: {
+				ResetVersionOnError: true,
+				ProgrammaticMigr: func(m *Migration,
+					driver database.Driver) error {
+
+					return driver.Run(
+						strings.NewReader("CALLBACK 7"),
+					)
+				},
+			},
+		},
+	))
+
+	m.sourceDrv.(*sStub.Stub).Migrations = sourceProgrammaticMigrations
+	dbDrv := m.databaseDrv.(*dStub.Stub)
+
+	// 1) Run Up — the programmatic migration for 2 should fail.
+	err := m.Up()
+	if !errors.Is(err, cbError) {
+		t.Fatal("expected cbError from failing programmatic migration")
+	}
+
+	// The sequence should show the migrations prior to version 2, and then
+	// the failing callback for version 2.
+	expectedSequence := migrationSequence{
+		mr("CREATE 1"),
+		mr("CALLBACK 2 FAILURE"),
+	}
+	equalDbSeq(t, 0, expectedSequence, dbDrv)
+
+	if !bytes.Equal(dbDrv.LastRunMigration, []byte("CALLBACK 2 FAILURE")) {
+		t.Fatalf("expected database last migration to be callback 2, "+
+			"got %s", dbDrv.LastRunMigration)
+	}
+
+	// 2) Due to that the programmatic migration errored, the version should
+	// have been reset to the version set before the programmatic migration
+	// was executed.
+	checkVersion(t, dbDrv, 1)
+
+	// 3) Re-run Up — since the database version is set to version 1, it
+	// should try the programmatic migration again at version 2 and fail
+	// again.
+	err = m.Up()
+	if !errors.Is(err, cbError) {
+		t.Fatal("expected cbError from failing programmatic migration")
+	}
+
+	// The programmatic migration for version 2 should now have failed twice.
+	expectedSequence = migrationSequence{
+		mr("CREATE 1"),
+		mr("CALLBACK 2 FAILURE"),
+		mr("CALLBACK 2 FAILURE"),
+	}
+	equalDbSeq(t, 0, expectedSequence, dbDrv)
+
+	if !bytes.Equal(dbDrv.LastRunMigration, []byte("CALLBACK 2 FAILURE")) {
+		t.Fatalf("expected database last migration to be callback 2, "+
+			"got %s", dbDrv.LastRunMigration)
+	}
+
+	// The version should have been reset to 1 once again.
+	checkVersion(t, dbDrv, 1)
+
+	// 4) Execute down — as the version should have been reset to 1, this
+	// should not re-execute the programmatic migration for version 2.
+	err = m.Down()
+	if err != nil {
+		t.Fatalf("unexpected Down error: %v", err)
+	}
+
+	expectedSequence = migrationSequence{
+		mr("CREATE 1"),
+		mr("CALLBACK 2 FAILURE"),
+		mr("CALLBACK 2 FAILURE"),
+		mr("DROP 1"),
+	}
+	equalDbSeq(t, 0, expectedSequence, dbDrv)
+
+	if !bytes.Equal(dbDrv.LastRunMigration, []byte("DROP 1")) {
+		t.Fatalf("expected database last migration to be DROP 1, "+
+			"got %s", dbDrv.LastRunMigration)
+	}
+
+	// The version should now be at -1, as the migration for version 1 has
+	// been dropped.
+	checkVersion(t, dbDrv, -1)
+
+	// 5) Make the callback succeed by setting shouldFail to false and run
+	// again. It should now successfully re-run the callback and then
+	// finalize the migration cleanly to the latest version (7).
+	shouldFail = false
+
+	err = m.Up()
+	if err != nil {
+		t.Fatalf("unexpected Up error: %v", err)
+	}
+
+	expectedSequence = migrationSequence{
+		mr("CREATE 1"),
+		mr("CALLBACK 2 FAILURE"),
+		mr("CALLBACK 2 FAILURE"),
+		mr("DROP 1"),
+		mr("CREATE 1"),
+		mr("CALLBACK 2 SUCCESS"),
+		mr("CREATE 3"),
+		mr("CREATE 4"),
+		mr("CALLBACK 7"),
+	}
+	equalDbSeq(t, 0, expectedSequence, dbDrv)
+
+	// And the last run migration should be from the callback.
+	if !bytes.Equal(dbDrv.LastRunMigration, []byte("CALLBACK 7")) {
+		t.Fatalf("expected last run migration to be from the "+
+			"programmatic migration, got %q",
+			dbDrv.LastRunMigration)
+	}
+
+	// The version should now be the latest migration version 7 and not
+	// dirty.
+	checkVersion(t, dbDrv, 7)
+
+	// Try Up again — it should be a no-op since we are at the latest
+	// version, and shouldn't run the programmatic migration again.
+	err = m.Up()
+	if !errors.Is(err, ErrNoChange) {
+		t.Fatalf("unexpected error after programmatic migration "+
+			"succeed: %v", err)
+	}
+
+	// Ensure the callback wasn't re-run.
+	expectedSequence = migrationSequence{
+		mr("CREATE 1"),
+		mr("CALLBACK 2 FAILURE"),
+		mr("CALLBACK 2 FAILURE"),
+		mr("DROP 1"),
+		mr("CREATE 1"),
+		mr("CALLBACK 2 SUCCESS"),
+		mr("CREATE 3"),
+		mr("CREATE 4"),
+		mr("CALLBACK 7"),
+	}
+	equalDbSeq(t, 0, expectedSequence, dbDrv)
+
+	// And the last run migration should be from the previous callback.
+	if !bytes.Equal(dbDrv.LastRunMigration, []byte("CALLBACK 7")) {
+		t.Fatalf("expected last run migration to be from programmatic"+
+			"migration, got %q", dbDrv.LastRunMigration)
+	}
+
+	checkVersion(t, dbDrv, 7)
+
+	// 6) Finally, running Down now should only execute the programmatic
+	// migration at for version 2, as that programmatic migration is the
+	// only programmatic migration that has a defined ".down" file.
+	// We start setting the shouldFail boolean to true again, be able to
+	// test the retry logic for .down migrations for programmatic migrations
+	// as well.
+	shouldFail = true
+
+	err = m.Down()
+	if !errors.Is(err, cbError) {
+		t.Fatal("expected cbError from failing programmatic migration")
+	}
+
+	expectedSequence = migrationSequence{
+		mr("CREATE 1"),
+		mr("CALLBACK 2 FAILURE"),
+		mr("CALLBACK 2 FAILURE"),
+		mr("DROP 1"),
+		mr("CREATE 1"),
+		mr("CALLBACK 2 SUCCESS"),
+		mr("CREATE 3"),
+		mr("CREATE 4"),
+		mr("CALLBACK 7"),
+		mr("DROP 5"),
+		mr("DROP 4"),
+		mr("CALLBACK 2 FAILURE"),
+	}
+	equalDbSeq(t, 0, expectedSequence, dbDrv)
+
+	if !bytes.Equal(dbDrv.LastRunMigration, []byte("CALLBACK 2 FAILURE")) {
+		t.Fatalf("expected database last migration to be callback 2, "+
+			"got %s", dbDrv.LastRunMigration)
+	}
+
+	// The version should be at 2, as the programmatic migration for that
+	// version should have failed.
+	checkVersion(t, dbDrv, 2)
+
+	// Finally, we set shouldFail to false again, and retry the downgrade.
+	// This should now succeed and execute the programmatic migration for
+	// version 2 successfully.
+	shouldFail = false
+
+	err = m.Down()
+	if err != nil {
+		t.Fatalf("unexpected down error: %v", err)
+	}
+
+	expectedSequence = migrationSequence{
+		mr("CREATE 1"),
+		mr("CALLBACK 2 FAILURE"),
+		mr("CALLBACK 2 FAILURE"),
+		mr("DROP 1"),
+		mr("CREATE 1"),
+		mr("CALLBACK 2 SUCCESS"),
+		mr("CREATE 3"),
+		mr("CREATE 4"),
+		mr("CALLBACK 7"),
+		mr("DROP 5"),
+		mr("DROP 4"),
+		mr("CALLBACK 2 FAILURE"),
+		mr("CALLBACK 2 SUCCESS"),
+		mr("DROP 1"),
+	}
+	equalDbSeq(t, 0, expectedSequence, dbDrv)
+
+	if !bytes.Equal(dbDrv.LastRunMigration, []byte("DROP 1")) {
+		t.Fatalf("expected database last migration to be DROP 1, "+
+			"got %s", dbDrv.LastRunMigration)
+	}
+
+	// The version should now be at -1, as the migration for version 1 has
+	// been dropped.
+	checkVersion(t, dbDrv, -1)
+}
+
+// TestProgrammaticMigrationErrorNoRerun ensures that when ResetVersionOnError
+// is false, a failing programmatic migration leaves the database dirty at the
+// current migration version instead of rewinding to the prior version.
+func TestProgrammaticMigrationErrorNoRerun(t *testing.T) {
+	cbError := errors.New("programmatic migration failure")
+
+	m, _ := New("stub://", "stub://", WithProgrammaticMigrations(
+		map[uint]ProgrammaticMigrEntry{
+			2: {
+				ResetVersionOnError: false,
+				ProgrammaticMigr: func(migr *Migration,
+					driver database.Driver) error {
+
+					if err := driver.Run(strings.NewReader(
+						"CALLBACK 2 FAILURE",
+					)); err != nil {
+						return err
+					}
+					return cbError
+				},
+			},
+		},
+	))
+
+	m.sourceDrv.(*sStub.Stub).Migrations = sourceProgrammaticMigrations
+	dbDrv := m.databaseDrv.(*dStub.Stub)
+
+	err := m.Up()
+	if !errors.Is(err, cbError) {
+		t.Fatalf("expected cbError from failing programmatic "+
+			"migration, got %v", err)
+	}
+
+	version, dirty, err := dbDrv.Version()
+	if err != nil {
+		t.Fatalf("version: %v", err)
+	}
+	if version != 2 || !dirty {
+		t.Fatalf("expected version 2 dirty after failure, got "+
+			"version=%d dirty=%v", version, dirty)
+	}
+	if !bytes.Equal(dbDrv.LastRunMigration, []byte("CALLBACK 2 FAILURE")) {
+		t.Fatalf("expected last migration body to be failure "+
+			"callback, got %s", dbDrv.LastRunMigration)
+	}
+
+	// Re-running Up again, should fail with ErrDirty for version 2, as
+	// the database should be in a dirty state.
+	if err = m.Up(); !errors.Is(err, ErrDirty{2}) {
+		t.Fatalf("expected version 2 dirty error on re-running Up, "+
+			"got %v", err)
+	}
+}
+
+// TestMigrationTypeCombos test ensures that a migration cannot be both an SQL
+// migration and a programmatic migration at the same time. It also tests that a
+// migration can be neither an SQL migration nor a programmatic migration.
+func TestMigrationTypeCombos(t *testing.T) {
+	// Test that a migration can't be both an SQL migration and a
+	// programmatic migration at the same time.
+	m1, _ := New("stub://", "stub://", WithProgrammaticMigrations(
+		map[uint]ProgrammaticMigrEntry{
+			2: {
+				ResetVersionOnError: true,
+				ProgrammaticMigr: func(m *Migration,
+					driver database.Driver) error {
+
+					return driver.Run(
+						strings.NewReader("CALLBACK 2"),
+					)
+				},
+			},
+		},
+	))
+	dbDrv1 := m1.databaseDrv.(*dStub.Stub)
+
+	bothTypeMig := source.NewMigrations()
+	bothTypeMig.Append(
+		&source.Migration{Version: 1, Direction: source.Up,
+			Identifier: "CREATE 1"},
+	)
+	bothTypeMig.Append(
+		&source.Migration{Version: 1, Direction: source.Down,
+			Identifier: "DROP 1"},
+	)
+	bothTypeMig.Append(
+		&source.Migration{Version: 2, Direction: source.Up,
+			Identifier: "CREATE 2"},
+	)
+	bothTypeMig.Append(
+		&source.Migration{Version: 2, Direction: source.Down,
+			Identifier: "DROP 2"},
+	)
+
+	m1.sourceDrv.(*sStub.Stub).Migrations = bothTypeMig
+
+	err := m1.Up()
+	if err == nil || !errors.Is(err, ErrMixedMigration) {
+		t.Fatalf("expected %v, but got %v", ErrMixedMigration, err)
+	}
+
+	// We expect that only migration 1 should have been executed, as the
+	// migration for version 2 should have errored before being executed.
+	expectedSequence := migrationSequence{
+		mr("CREATE 1"),
+	}
+	equalDbSeq(t, 0, expectedSequence, dbDrv1)
+
+	// The db version should only be at 1, as the migration for version 2
+	// should have errored before any version was set.
+	checkVersion(t, dbDrv1, 1)
+
+	err = m1.Down()
+	if err != nil {
+		t.Fatalf("expected %v, but got %v", ErrMixedMigration, err)
+	}
+
+	// As the up migration for version 2 was never run, we expect that we
+	// only execute the down migration for version 1 as well.
+	expectedSequence = migrationSequence{
+		mr("CREATE 1"),
+		mr("DROP 1"),
+	}
+	equalDbSeq(t, 0, expectedSequence, dbDrv1)
+
+	checkVersion(t, dbDrv1, -1)
+
+	// Test that a migration can be neither an SQL migration nor a
+	// programmatic migration.
+	m2, _ := New("stub://", "stub://")
+	dbDrv2 := m2.databaseDrv.(*dStub.Stub)
+
+	noTypeMig := source.NewMigrations()
+	noTypeMig.Append(
+		&source.Migration{Version: 1, Direction: source.Up,
+			Identifier: ""},
+	)
+	noTypeMig.Append(
+		&source.Migration{Version: 1, Direction: source.Down,
+			Identifier: ""},
+	)
+
+	m2.sourceDrv.(*sStub.Stub).Migrations = noTypeMig
+
+	err = m2.Up()
+	if err != nil {
+		t.Fatal("unexpected error when a migration was neither an " +
+			"SQL migration nor a programmatic migration")
+	}
+
+	// We expect that no migration sequence has been executed, as the
+	// migration for version 1 didn't contain any SQL or programmatic
+	// migration.
+	equalDbSeq(t, 0, migrationSequence{}, dbDrv2)
+
+	// The version should have been changed to 1 though, as the migration
+	// should be seen as a valid migration.
+	checkVersion(t, dbDrv2, 1)
+
+	// The same behavior should be observed when downgrading.
+	err = m2.Down()
+	if err != nil {
+		t.Fatal("unexpected error when a migration was neither an " +
+			"SQL migration nor a programmatic migration")
+	}
+
+	// We still expect no migration sequence.
+	equalDbSeq(t, 0, migrationSequence{}, dbDrv2)
+
+	// The version should have been changed to -1 though, as the migration
+	// should be seen as a valid migration.
+	checkVersion(t, dbDrv2, -1)
 }
 
 func TestUpDirty(t *testing.T) {
@@ -1523,5 +2000,21 @@ func equalDbSeq(t *testing.T, i int, expected migrationSequence, got *dStub.Stub
 	bs := expected.bodySequence()
 	if !got.EqualSequence(bs) {
 		t.Fatalf("\nexpected sequence %v,\ngot               %v, in %v", bs, got.MigrationSequence, i)
+	}
+}
+
+// checkVersion is a helper function to check the migration version and dirty
+// state.
+func checkVersion(t *testing.T, dbDrv *dStub.Stub, expVer int) {
+	v, dirty, err := dbDrv.Version()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if v != expVer {
+		t.Fatalf("expected version %d, got v=%d", expVer, v)
+	}
+	if dirty {
+		t.Fatalf("expected clean version, but was dirty")
 	}
 }
